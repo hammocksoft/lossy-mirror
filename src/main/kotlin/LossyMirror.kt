@@ -20,7 +20,7 @@ object LossyMirror {
      * Copy artwork and existing lossy audio files as is.
      */
     private val COPY_AS_IS_EXTENSIONS = listOf("mp3", "ogg", "aac", "jpg", "jpeg", "png", "gif")
-    private val CONVERT_EXTENSIONS = listOf("flac", "alac")
+    private val CONVERT_EXTENSIONS = listOf("flac", "alac", "aiff")
     private val workingDir = File("/tmp")
 
     fun doMirror(srcDirs: List<File>, targetDir: File) {
@@ -54,19 +54,22 @@ object LossyMirror {
 
     private fun convertOrCopy(srcFile: File, targetDir: File, rootDir: String, index: FileIndex) {
         val relativePath = srcFile.absolutePath.removePrefix(rootDir)
-        if (index.files.contains(relativePath)) {
-            println("$relativePath found in index, skipping")
-            if (!srcFile.isDirectory) {
+        val isDirectory = srcFile.isDirectory
+        if (!isDirectory) {
+            totalCount++
+        }
+        if (index.contains(relativePath)) {
+//            println("$relativePath found in index, skipping")
+            if (!isDirectory) {
                 existingCount++
             }
             return
         }
-        if (srcFile.isDirectory) {
-            index.files.add(relativePath)
+        if (isDirectory) {
+            index.add(relativePath)
             handleDirectory(targetDir, relativePath)
             return
         } else {
-            totalCount++
             if (srcFile.length() == 0L) {
                 skippedCount++
                 brokenFiles.add(srcFile.absolutePath)
@@ -78,14 +81,10 @@ object LossyMirror {
         val isAac = isAac(srcFile, extension)
 
         if (isAac || COPY_AS_IS_EXTENSIONS.contains(extension)) {
-            if (index.files.contains(relativePath)) {
-                println("$relativePath found in index, skipping")
-            } else {
-                copyFile(srcFile, targetDir, relativePath)
-                index.files.add(relativePath)
-            }
+            copyFile(srcFile, targetDir, relativePath, index)
+            index.add(relativePath)
         } else {
-            if (!CONVERT_EXTENSIONS.contains(extension)) {
+            if (!(CONVERT_EXTENSIONS.contains(extension) || extension == "m4a")) {
                 println("Don't know how to handle $relativePath, skipping")
                 skippedCount++
             } else {
@@ -98,6 +97,8 @@ object LossyMirror {
         return if (extension == "m4a") {
             runCommand(
                     "ffmpeg",
+                    "-loglevel",
+                    "quiet",
                     "-i",
                     srcFile.absolutePath
             ).contains("Audio: aac")
@@ -106,17 +107,51 @@ object LossyMirror {
 
     private fun convertFile(srcFile: File, targetDir: File, relativePath: String, index: FileIndex) {
         val convertedRelativePath = relativePath.replaceAfterLast('.', "ogg")
-        if (index.files.contains(convertedRelativePath)) {
-            println("$convertedRelativePath found in index, skipping")
+        if (index.contains(convertedRelativePath)) {
+//            println("$convertedRelativePath found in index, skipping")
+            existingCount++
         } else {
             val targetFile = File(targetDir, convertedRelativePath)
-            convertFile(srcFile, targetFile)
-            index.files.add(convertedRelativePath)
+            doConvertFile(srcFile, targetFile, convertedRelativePath, index)
+            index.add(convertedRelativePath)
+        }
+    }
+
+    private fun doConvertFile(srcFile: File, targetFile: File, relativePath: String, index: FileIndex) {
+        val inputPath = srcFile.absolutePath
+        val output = targetFile.absolutePath
+        if (!targetFile.exists()) {
+            println("converting ${srcFile.absolutePath} to  ${targetFile.absolutePath}")
+            runCommand(
+                    "ffmpeg",
+                    "-loglevel",
+                    "warning",
+                    "-i",
+                    inputPath,
+                    "-vb",
+                    "192k",
+                    "-map_metadata",
+                    "0",
+                    "-id3v2_version",
+                    "3",
+                    output,
+            )
+            convertedCount++
+        } else {
+            // indexed files are already counted
+            if (!index.contains(relativePath)) {
+                existingCount++
+            }
+        }
+        // if some error occurred the file length will be zero
+        if (targetFile.length() == 0L) {
+            brokenFiles.add(targetFile.absolutePath)
+            brokenAlbums.add(targetFile.parentFile.absolutePath)
         }
     }
 
     private fun writeIndex(index: FileIndex, indexFile: File) {
-        indexFile.writeText(index.files.joinToString("\n"))
+        indexFile.writeText(index.build())
     }
 
     private fun handleDirectory(targetDir: File, relativePath: String) {
@@ -128,48 +163,34 @@ object LossyMirror {
         }
     }
 
-    private fun convertFile(srcFile: File, targetFile: File) {
-        val inputPath = srcFile.absolutePath
-        val output = targetFile.absolutePath
-        println("converting ${srcFile.absolutePath} to  ${targetFile.absolutePath}")
-        runCommand(
-                "ffmpeg",
-                "-i",
-                inputPath,
-                "-vb",
-                "192k",
-                "-map_metadata",
-                "0",
-                "-id3v2_version",
-                "3",
-                output,
-        )
-        convertedCount++
-        // if some error occurred the file length will be zero
-        if (targetFile.length() == 0L) {
-            brokenFiles.add(targetFile.absolutePath)
-            brokenAlbums.add(targetFile.parentFile.absolutePath)
-        }
-    }
 
-    private fun copyFile(srcFile: File, targetDir: File, relativePath: String) {
+    private fun copyFile(srcFile: File, targetDir: File, relativePath: String, index: FileIndex) {
         val targetFile = File(targetDir, relativePath)
         println("copying ${srcFile.absolutePath} to  ${targetFile.absolutePath}")
         // File.copy has issues when copying files directly to the phone, so we use cp instead.
         //                    srcFile.copyTo(targetFile)
-        runCommand(
-                "cp",
-                "-v",
-                srcFile.absolutePath,
-                targetFile.absolutePath
-        )
-        copyCount++
+        if (!targetFile.exists()) {
+            runCommand(
+                    "cp",
+                    "-v",
+                    srcFile.absolutePath,
+                    targetFile.absolutePath
+            )
+            copyCount++
+        } else {
+            // indexed files are already counted
+            if (!index.contains(relativePath)) {
+                existingCount++
+            }
+        }
     }
 
     private fun runCommand(vararg cmd: String): String {
 //    println("executing: ${cmd.joinToString()}")
         val process = ProcessBuilder(*cmd)
                 .directory(workingDir)
+                .redirectOutput(ProcessBuilder.Redirect.INHERIT)
+                .redirectError(ProcessBuilder.Redirect.INHERIT)
                 .start()
         process.waitFor(60, TimeUnit.MINUTES)
 
@@ -177,7 +198,7 @@ object LossyMirror {
             val error = BufferedReader(process.errorStream.reader()).use {
                 it.readText()
             }
-            throw RuntimeException("ERROR running command: $cmd: $error")
+            throw RuntimeException("ERROR running command: ${cmd.joinToString(" ")}: $error")
         }
 
         val reader = BufferedReader(process.inputStream.reader())
@@ -187,13 +208,13 @@ object LossyMirror {
     }
 
     private fun rebuildIndex(indexFile: File, targetDir: File): FileIndex {
-        val idx = FileIndex()
         val rootDir = targetDir.absolutePath
+        val idx = FileIndex()
         println(".lossy.idx not found, rebuilding from existing files (if any). This might take a while...")
         targetDir.walkTopDown().forEach {
             if (it.absolutePath != targetDir.absolutePath) {
                 val relativePath = it.absolutePath.removePrefix(rootDir)
-                idx.files.add(relativePath)
+                idx.add(relativePath)
             }
         }
         writeIndex(idx, indexFile)
@@ -225,5 +246,10 @@ object LossyMirror {
     }
 
 
-    data class FileIndex(val files: SortedSet<String> = TreeSet())
+    data class FileIndex(private val files: SortedSet<String> = TreeSet()) {
+        fun contains(file: File, rootDir: String) = contains(file.absolutePath.removePrefix(rootDir))
+        fun contains(name: String) = files.contains(name)
+        fun add(name: String) = files.add(name)
+        fun build(): String = files.joinToString("\n")
+    }
 }

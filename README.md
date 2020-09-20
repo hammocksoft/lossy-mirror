@@ -14,7 +14,7 @@ Mirrors all audio files found in the specified source folders as Ogg Vorbis into
 
 Supports:
 * mp3, aac, ogg and jpg files will be copied as is
-* flac and alac files will be converted to Ogg Vorbis with variable bitrate (maximum 192 kbit)
+* flac, aiff and alac files will be converted to Ogg Vorbis with variable bitrate (maximum 192 kbit)
 
 Creates an index file ``.lossy.idx`` to speed up mirroring to an existing mirror directory.
 
